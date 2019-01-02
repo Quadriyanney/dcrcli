@@ -1,97 +1,84 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/raedahgroup/dcrcli/walletrpcclient"
+	"github.com/jessevdk/go-flags"
+	"github.com/raedahgroup/godcr/app"
+	"github.com/raedahgroup/godcr/app/config"
+	"github.com/raedahgroup/godcr/cli/commands"
+	"github.com/raedahgroup/godcr/cli/help"
+	"github.com/raedahgroup/godcr/cli/runner"
+	"github.com/raedahgroup/godcr/cli/walletloader"
 )
 
-type (
-	response struct {
-		columns []string
-		result  [][]interface{}
-	}
-	// handler carries out the action required by a command.
-	// commandArgs holds the arguments passed to the command.
-	handler func(walletrpcclient *walletrpcclient.Client, commandArgs []string) (*response, error)
-
-	// cli holds data needed to run the program.
-	cli struct {
-		funcMap         map[string]handler
-		appName         string
-		walletrpcclient *walletrpcclient.Client
-	}
-)
-
-// New creates a new cli object with the given arguments.
-func New(walletrpcclient *walletrpcclient.Client, appName string) *cli {
-	client := &cli{
-		funcMap:         make(map[string]handler),
-		walletrpcclient: walletrpcclient,
-		appName:         appName,
-	}
-
-	// register handlers
-	client.registerHandlers()
-
-	return client
+// appConfigWithCliCommands is the entrypoint to the cli application.
+// It defines general app options, cli commands with their command-specific options and general cli options
+type appConfigWithCliCommands struct {
+	commands.AvailableCommands
+	commands.ExperimentalCommands
+	config.Config
 }
 
-func (c *cli) registerHandlers() {
-	commands := supportedCommands()
-	for _, command := range commands {
-		c.registerHandler(command.name, command.handler)
+// Run starts the app in cli interface mode
+func Run(ctx context.Context, walletMiddleware app.WalletMiddleware, appConfig config.Config) error {
+	configWithCommands := &appConfigWithCliCommands{
+		Config: appConfig,
+	}
+	parser := flags.NewParser(configWithCommands, flags.HelpFlag|flags.PassDoubleDash)
+
+	// use command handler wrapper function to provide wallet dependency injection to command handlers at execution time
+	parser.CommandHandler = func(command flags.Commander, args []string) error {
+		commandRunner := runner.New(ctx, walletMiddleware)
+		return commandRunner.Run(parser, command, args, configWithCommands.CliOptions)
+	}
+
+	// parser.Parse invokes parser.CommandHandler if a command is provided
+	// returns an error of type ErrCommandRequired
+	_, err := parser.Parse()
+	noCommandPassed := config.IsFlagErrorType(err, flags.ErrCommandRequired)
+	helpFlagPassed := config.IsFlagErrorType(err, flags.ErrHelp)
+
+	// if no command is passed but --sync flag was passed, perform sync operation and return
+	if noCommandPassed && configWithCommands.CliOptions.SyncBlockchain {
+		return syncBlockChain(ctx, walletMiddleware)
+	}
+
+	if noCommandPassed {
+		listCommands()
+	} else if helpFlagPassed {
+		displayHelpMessage(parser.Name, parser.Active)
+	} else if err != nil {
+		fmt.Println(err)
+	}
+
+	return err
+}
+
+func syncBlockChain(ctx context.Context, walletMiddleware app.WalletMiddleware) error {
+	walletExists, err := walletloader.OpenWallet(ctx, walletMiddleware)
+	if err != nil || !walletExists {
+		return err
+	}
+
+	return walletloader.SyncBlockChain(ctx, walletMiddleware)
+}
+
+// listCommands prints a simple list of available commands when godcr is run without any command
+func listCommands() {
+	help.PrintOptionsSimple(os.Stdout, commands.HelpParser().Groups())
+	for _, category := range commands.Categories() {
+		fmt.Fprintf(os.Stderr, "%s: %s\n", category.ShortName, strings.Join(category.CommandNames, ", "))
 	}
 }
 
-// registerHandler registers a command, its description and its handler
-func (c *cli) registerHandler(key string, h handler) {
-	if _, ok := c.funcMap[key]; ok {
-		panic("trying to register a handler twice: " + key)
+func displayHelpMessage(appName string, activeCommand *flags.Command) {
+	if activeCommand == nil {
+		help.PrintGeneralHelp(os.Stdout, commands.HelpParser(), commands.Categories())
+	} else {
+		help.PrintCommandHelp(os.Stdout, appName, activeCommand)
 	}
-
-	c.funcMap[key] = h
-}
-
-// RunCommand invokes the handler function registered for the given
-// command in `commandArgs`.
-//
-// If no command, or an unsupported command is passed to RunCommand,
-// the program exits with an error.
-// commandArgs[0] is the command to run. commandArgs[1:] are the arguments to the command.
-func (c *cli) RunCommand(commandArgs []string) {
-	if len(commandArgs) == 0 {
-		PrintHelp(c.appName)
-		os.Exit(1)
-	}
-
-	command := commandArgs[0]
-	if !c.isCommandSupported(command) {
-		c.invalidCommandReceived(command)
-		os.Exit(1)
-	}
-
-	handler := c.funcMap[command]
-	res, err := handler(c.walletrpcclient, commandArgs[1:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing command '%s'\n", command)
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
-	}
-
-	printResult(tabWriter(os.Stdout), res)
-	os.Exit(0)
-}
-
-// IsCommandSupported returns true if the `command` specified is registered
-// on the current cli object; otherwise, it returns false.
-func (c *cli) isCommandSupported(command string) bool {
-	_, ok := c.funcMap[command]
-	return ok
-}
-
-func (c *cli) invalidCommandReceived(command string) {
-	fmt.Fprintf(os.Stderr, "%s: '%s' is not a supported command.\n\n", c.appName, command)
-	PrintHelp(c.appName)
 }

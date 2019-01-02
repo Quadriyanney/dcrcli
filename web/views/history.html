@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+{{ template "html-head" }}
+<body>
+    <div class="body">
+        {{ template "header" }}
+        <div class="content">
+            <div class="container">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Amount</th>
+                            <th>Fee</th>
+                            <th>Direction</th>
+                            <th>Type</th>
+                            <th>Hash</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                       {{ range $txn := .result }}
+                       <tr>
+                            <td>{{ .FormattedTime }}</td>
+                            <td>{{ .Amount }}</td>
+                            <td>{{ .Fee }}</td>
+                            <td>{{ .Direction }}</td>
+                            <td>{{ .Type }}</td>
+                            <td>{{ .Hash }}</td>
+                        </tr>
+                       {{ end }}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
